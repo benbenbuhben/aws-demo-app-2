@@ -1,0 +1,67 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 12
+    commands:
+      - echo Installing dependencies...
+      - npm install
+      - echo Installing kubectl...
+      - curl -s -LO "https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl"
+      - chmod +x kubectl
+      - mv kubectl /usr/local/bin/
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - $(aws ecr get-login --no-include-email --region us-east-1)
+      - REPOSITORY_URI=992382508838.dkr.ecr.us-east-1.amazonaws.com/demo-app
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=app2-${COMMIT_HASH:=latest}
+      - echo Setting up kubeconfig...
+      - aws eks update-kubeconfig --region us-east-1 --name ihme-demo-cluster --role-arn arn:aws:iam::992382508838:role/codebuild_service_role
+      - kubectl config use-context arn:aws:eks:us-east-1:992382508838:cluster/ihme-demo-cluster
+      - echo Displaying kubeconfig contents...
+      - cat ~/.kube/config
+      - export KUBECONFIG=/root/.kube/config
+      - echo Retrieving parameters from Parameter Store...
+      - DB_HOST=$(aws ssm get-parameter --name /ihme-demo-app/DB_HOST --with-decryption --query 'Parameter.Value' --output text)
+      - DB_USER=$(aws ssm get-parameter --name /ihme-demo-app/DB_USER --with-decryption --query 'Parameter.Value' --output text)
+      - DB_PASSWORD=$(aws ssm get-parameter --name /ihme-demo-app/DB_PASSWORD --with-decryption --query 'Parameter.Value' --output text)
+      - DB_NAME=$(aws ssm get-parameter --name /ihme-demo-app/DB_NAME --with-decryption --query 'Parameter.Value' --output text)
+      - export DB_HOST DB_USER DB_PASSWORD DB_NAME
+      - DOCKER_USERNAME=$(aws ssm get-parameter --name /ihme-demo-app/DOCKER_USERNAME --with-decryption --query 'Parameter.Value' --output text)
+      - DOCKER_PASSWORD=$(aws ssm get-parameter --name /ihme-demo-app/DOCKER_PASSWORD --with-decryption --query 'Parameter.Value' --output text)
+      - export DOCKER_USERNAME DOCKER_PASSWORD
+      - echo Environment variables...
+      - echo DB_HOST=$DB_HOST
+      - echo DB_USER=$DB_USER
+      - echo DB_PASSWORD=$DB_PASSWORD
+      - echo DB_NAME=$DB_NAME
+  build:
+    commands:
+      - echo Build started on `date`
+      - echo Authenticating to Docker Hub...
+      - docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD
+      - echo Building the Docker image...
+      - docker build -t $REPOSITORY_URI:app2-latest -t $REPOSITORY_URI:$IMAGE_TAG .
+  post_build:
+    commands:
+      - echo Build completed on `date`
+      - echo Pushing the Docker images...
+      - docker push $REPOSITORY_URI:app2-latest
+      - docker push $REPOSITORY_URI:$IMAGE_TAG
+      - echo Applying deployment configuration...
+      - kubectl version
+      - kubectl config view
+      - kubectl get nodes
+      - kubectl apply -f deployment.yml --validate=false
+      - kubectl apply -f service.yml
+      - kubectl apply -f ingress.yml
+      - echo Updating Kubernetes deployment with new image...
+      - kubectl set image deployment/demo-app-2 demo-app-2=$REPOSITORY_URI:$IMAGE_TAG --record
+      - echo Updating environment variables in Kubernetes deployment...
+      - kubectl set env deployment/demo-app-2 DB_HOST=$DB_HOST DB_USER=$DB_USER DB_PASSWORD=$DB_PASSWORD DB_NAME=$DB_NAME
+artifacts:
+  files: "**/*"
+  discard-paths: yes
